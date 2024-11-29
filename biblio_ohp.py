@@ -1,7 +1,10 @@
+import os
 import requests
 import argparse
+import ast
+import time
 
-# Mapping des instruments avec leurs télescopes
+# Mapping instruments with their telescopes
 INSTRUMENT_TELESCOPE_MAP = {
     "ELODIE": "T193",
     "GHASP": "T193",
@@ -43,7 +46,7 @@ def fetch_all_articles(year, keywords, api_token, bibstems=None):
     response = requests.get(
         base_url,
         headers=headers,
-        params={"q": query, "rows": 2000, "fl": "title,bibcode,url,author,abstract"}
+        params={"q": query, "rows": 2000, "fl": "title,bibcode,url,author,abstract,links_data"}
     )
 
     if response.status_code != 200:
@@ -51,7 +54,7 @@ def fetch_all_articles(year, keywords, api_token, bibstems=None):
         return []
 
     articles = response.json().get("response", {}).get("docs", [])
-    print(f"Found {len(articles)} articles containing at least one keyword.")
+    print(f"Found {len(articles)} articles containing at least one instrument.")
     return articles
 
 
@@ -70,17 +73,30 @@ def verify_keywords_in_article(bibcode, keywords, api_token):
     headers = {"Authorization": f"Bearer {api_token}"}
     found_keywords = []
 
+    print(f"Verifying instruments for article {bibcode}...")
+
     for keyword in keywords:
+        #print(f"Checking keyword: {keyword}")
         query = f'bibcode:"{bibcode}" AND (title:"{keyword}" OR abstract:"{keyword}" OR full:"{keyword}")'
         response = requests.get(
             base_url,
             headers=headers,
             params={"q": query, "rows": 1, "fl": "bibcode"}
         )
+        time.sleep(1)
 
         if response.status_code == 200 and response.json().get("response", {}).get("numFound", 0) > 0:
             found_keywords.append(keyword)
+        #if response.status_code == 200:
+        #    if response.json().get("response", {}).get("numFound", 0) > 0:
+        #        print(f"Keyword '{keyword}' found for {bibcode}.")
+        #        found_keywords.append(keyword)
+        #    else:
+        #        print(f"Keyword '{keyword}' not found for {bibcode}.")
+        #else:
+        #    print(f"Failed to check keyword '{keyword}' for {bibcode} (HTTP {response.status_code}).")
 
+    print(f"Instruments found for {bibcode}: {found_keywords}")
     return found_keywords
 
 
@@ -94,6 +110,17 @@ def save_articles_to_html(articles, year):
     Returns:
         None
     """
+    # Create the directory for the articles
+    directory_name = f"articles_{year}"
+    os.makedirs(directory_name, exist_ok=True)
+
+    # Headers to mimic a browser request
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    }
+
+    # Initialize the HTML file
     total_articles = len(articles)
     html_filename = f"pubs-{year}.html"
     with open(html_filename, "w", encoding="utf-8") as file:
@@ -101,11 +128,25 @@ def save_articles_to_html(articles, year):
         file.write(f"<h1>Publications {year}</h1>\n")
         file.write(f"<p><strong>Total articles: {total_articles}</strong></p>\n")
 
-        for article in articles:
+        for idx, article in enumerate(articles, start=1):
             title = " ".join(article.get("title", ["No title"]))
             bibcode = article.get("bibcode", "")
             authors = article.get("author", [])
             instruments = article.get("instruments", [])
+            links_data = article.get("links_data", [])
+            pdf_url = None
+
+            print(f"Processing article {idx}/{total_articles}: {title} ({bibcode})")
+
+            # Extract the PDF URL from links_data
+            for link in links_data:
+                try:
+                    link_info = ast.literal_eval(link)  # Convert JSON-like string to dict
+                    if link_info.get("type") == "pdf" and link_info.get("url"):
+                        pdf_url = link_info["url"]
+                        break
+                except Exception as e:
+                    print(f"Error parsing links_data for {bibcode}: {e}")
 
             # Format authors
             if len(authors) > 3:
@@ -116,11 +157,37 @@ def save_articles_to_html(articles, year):
             # Format instruments
             instruments_str = " ".join([f"{INSTRUMENT_TELESCOPE_MAP.get(instr, 'Unknown')} / {instr}" for instr in instruments])
 
-            # Write to file
+            # Download the PDF if available
+            local_pdf_path = "No PDF available"
+            if pdf_url:
+                print(f"Attempting to download PDF for {bibcode} from {pdf_url}")
+                try:
+                    response = requests.get(pdf_url, headers=headers, stream=True, allow_redirects=True)
+                    if response.status_code == 200:
+                        local_pdf_path = os.path.join(directory_name, f"{bibcode}.pdf")
+                        with open(local_pdf_path, "wb") as pdf_file:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                pdf_file.write(chunk)
+                        print(f"PDF successfully downloaded for {bibcode}")
+                    else:
+                        print(f"Failed to download PDF for {bibcode} (HTTP {response.status_code})")
+                        print(f"Final URL after redirection: {response.url}")
+                except Exception as e:
+                    print(f"Error downloading PDF for {bibcode}: {e}")
+            else:
+                print(f"No PDF URL found for {bibcode}.")
+
+            time.sleep(1)
+
+            # Write to the HTML file
             file.write(f"<p><strong>{instruments_str}</strong><br>\n")
             file.write(f"{author_list}<br>\n")
             file.write(f"<strong>{title}</strong><br>\n")
             file.write(f'<a href="https://ui.adsabs.harvard.edu/abs/{bibcode}/abstract" target="_blank">{bibcode}</a><br>\n</p>\n')
+            if pdf_url and local_pdf_path != "No PDF available":
+                file.write(f'<a href="{local_pdf_path}" target="_blank">Download PDF</a><br>\n</p>\n')
+            else:
+                file.write(f"<em>No PDF available</em><br>\n</p>\n")
 
         file.write("</body>\n</html>")
 
@@ -164,4 +231,10 @@ if __name__ == "__main__":
     API_TOKEN = "Replace with your ADS API token"  # Replace with your ADS API token
     KEYWORDS = ["AURELIE", "CORAVEL", "ELODIE", "GHASP", "MISTRAL", "SOPHIE", "OHP"]
     BIBSTEMS = ["A&A", "ApJ", "AJ", "MNRAS"]
+
+    # For small tests
+    #KEYWORDS = ["K-Stacker"]
+    #BIBSTEMS = ["A&A"]
+    #main(2022, KEYWORDS, API_TOKEN, BIBSTEMS)
+
     main(args.year, KEYWORDS, API_TOKEN, BIBSTEMS)
